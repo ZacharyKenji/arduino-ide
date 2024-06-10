@@ -124,26 +124,43 @@ jobs:
           CERTIFICATE_PASSWORD: ${{ secrets[matrix.certificate.password-secret] }}
         id: get-days-before-expiration
         run: |
-          EXPIRATION_DATE="$(
-            (
-              openssl pkcs12 \
-                -in "${{ env.CERTIFICATE_PATH }}" \
-                -clcerts \
-                -legacy \
-                -nodes \
-                -passin env:CERTIFICATE_PASSWORD
-            ) | (
-              openssl x509 \
-                -noout \
-                -enddate
-            ) | (
-              grep \
-                --max-count=1 \
-                --only-matching \
-                --perl-regexp \
-                'notAfter=(\K.*)'
-            )
-          )"
+          if [[ ${{ matrix.certificate.type }} == "pkcs12" ]]; then
+            EXPIRATION_DATE="$(
+              (
+                openssl pkcs12 \
+                  -in "${{ env.CERTIFICATE_PATH }}" \
+                  -clcerts \
+                  -legacy \
+                  -nodes \
+                  -passin env:CERTIFICATE_PASSWORD
+              ) | (
+                openssl x509 \
+                  -noout \
+                  -enddate
+              ) | (
+                grep \
+                  --max-count=1 \
+                  --only-matching \
+                  --perl-regexp \
+                  'notAfter=(\K.*)'
+              )
+            )"
+          elif [[ ${{ matrix.certificate.type }} == "x509" ]]; then
+            EXPIRATION_DATE="$(
+                (
+                openssl x509 \
+                    -in ${{ env.CERTIFICATE_PATH }} \
+                    -noout \
+                    -enddate
+                ) | (
+                grep \
+                    --max-count=1 \
+                    --only-matching \
+                    --perl-regexp \
+                    'notAfter=(\K.*)'
+                )
+            )"
+          fi
 
           DAYS_BEFORE_EXPIRATION="$((($(date --utc --date="$EXPIRATION_DATE" +%s) - $(date --utc +%s)) / 60 / 60 / 24))"
 
