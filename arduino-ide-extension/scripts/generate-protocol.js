@@ -7,8 +7,9 @@
   const { exec } = require('./utils');
   const glob = require('glob');
   const { SemVer, gte, valid: validSemVer } = require('semver');
-  const protoc = path.dirname(require('protoc/protoc'));
-
+  // Use a node-protoc fork until apple arm32 is supported
+  // https://github.com/YePpHa/node-protoc/pull/10
+  const protoc = path.dirname(require('@pingghost/protoc/protoc'));
   const repository = await fs.mkdtemp(path.join(os.tmpdir(), 'arduino-cli-'));
 
   const { owner, repo, commitish } = (() => {
@@ -149,6 +150,7 @@
   const protos = await new Promise((resolve) =>
     glob('**/*.proto', { cwd: rpc }, (error, matches) => {
       if (error) {
+        console.log('PROTOS FIND ERROR');
         console.log(error.stack ?? error.message);
         resolve([]);
         return;
