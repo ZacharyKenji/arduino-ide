@@ -21,11 +21,11 @@ import { Deferred } from '@theia/core/lib/common/promise-util';
 import { EnvVariablesServer } from '@theia/core/lib/common/env-variables';
 import { deepClone, nls } from '@theia/core';
 import { ErrnoException } from './utils/errors';
-import {
-  SettingsMergeRequest,
-  SettingsWriteRequest,
-} from './cli-protocol/cc/arduino/cli/commands/v1/settings_pb';
 import { createArduinoCoreServiceClient } from './arduino-core-service-client';
+import {
+  ConfigurationSaveRequest,
+  SettingsSetValueRequest,
+} from './cli-protocol/cc/arduino/cli/commands/v1/settings_pb';
 
 const deepmerge = require('deepmerge');
 
@@ -182,7 +182,11 @@ export class ConfigServiceImpl
       });
       const model = (yaml.safeLoad(content) || {}) as DefaultCliConfig;
       this.logger.info(`Loaded CLI configuration: ${JSON.stringify(model)}`);
-      if (model.directories.data && model.directories.user) {
+      if (
+        model.directories &&
+        model.directories.data &&
+        model.directories.user
+      ) {
         this.logger.info(
           "'directories.data' and 'directories.user' are set in the CLI configuration model."
         );
@@ -217,13 +221,20 @@ export class ConfigServiceImpl
 
   private async getFallbackCliConfig(): Promise<DefaultCliConfig> {
     const cliPath = this.daemon.getExecPath();
-    const rawJson = await spawnCommand(cliPath, [
+    const rawJson = await spawnCommand(cliPath, ['config', 'dump', '--json']);
+    const config = JSON.parse(rawJson);
+
+    // Since CLI 1.0, the command `config dump` only returns user-modified values and not default ones.
+    // directories.user and directories.data are required by IDE2 so we get the default value explicitly.
+    const directoriesRaw = await spawnCommand(cliPath, [
       'config',
-      'dump',
-      'format',
+      'get',
+      'directories',
       '--json',
     ]);
-    return JSON.parse(rawJson);
+    const { user, data } = JSON.parse(directoriesRaw);
+
+    return { ...config.config, directories: { user, data } };
   }
 
   private async initCliConfigTo(fsPathToDir: string): Promise<void> {
@@ -291,48 +302,64 @@ export class ConfigServiceImpl
   }
 
   private async updateDaemon(
-    port: number | number,
+    port: number,
     config: DefaultCliConfig
   ): Promise<void> {
-    const client = createArduinoCoreServiceClient({ port });
-    const req = new SettingsMergeRequest();
     const json = JSON.stringify(config, null, 2);
-    req.setJsonData(json);
     this.logger.info(`Updating daemon with 'data': ${json}`);
-    return new Promise<void>((resolve, reject) => {
-      client.settingsMerge(req, (error) => {
-        try {
-          if (error) {
-            reject(error);
-            return;
+
+    const updatableConfig = {
+      locale: config.locale,
+      'directories.user': config.directories.user,
+      'directories.data': config.directories.data,
+      'network.proxy': config.network?.proxy,
+      'board_manager.additional_urls':
+        config.board_manager?.additional_urls || [],
+    };
+
+    for (const [key, value] of Object.entries(updatableConfig)) {
+      const client = createArduinoCoreServiceClient({ port });
+      const req = new SettingsSetValueRequest();
+      req.setKey(key);
+      req.setEncodedValue(JSON.stringify(value));
+      await new Promise<void>((resolve, reject) => {
+        client.settingsSetValue(req, (error) => {
+          try {
+            if (error) {
+              reject(error);
+              return;
+            }
+            resolve();
+          } finally {
+            client.close();
           }
-          resolve();
-        } finally {
-          client.close();
-        }
+        });
       });
-    });
+    }
   }
 
-  private async writeDaemonState(port: number | number): Promise<void> {
+  private async writeDaemonState(port: number): Promise<void> {
     const client = createArduinoCoreServiceClient({ port });
-    const req = new SettingsWriteRequest();
-    const cliConfigUri = await this.getCliConfigFileUri();
-    const cliConfigPath = FileUri.fsPath(cliConfigUri);
-    req.setFilePath(cliConfigPath);
-    return new Promise<void>((resolve, reject) => {
-      client.settingsWrite(req, (error) => {
+    const req = new ConfigurationSaveRequest();
+    req.setSettingsFormat('yaml');
+
+    const configRaw = await new Promise<string>((resolve, reject) => {
+      client.configurationSave(req, (error, resp) => {
         try {
           if (error) {
             reject(error);
             return;
           }
-          resolve();
+          resolve(resp.getEncodedSettings());
         } finally {
           client.close();
         }
       });
     });
+
+    const cliConfigUri = await this.getCliConfigFileUri();
+    const cliConfigPath = FileUri.fsPath(cliConfigUri);
+    fs.writeFile(cliConfigPath, configRaw, { encoding: 'utf-8' });
   }
 
   // #1445
